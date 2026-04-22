@@ -1,6 +1,6 @@
 // Smoke test: connect to both WS endpoints, subscribe, print events for ~15s
-import { WsPriceClient } from './dist/exchange/wsPriceClient.js';
-import { WsAccountClient } from './dist/exchange/wsAccountClient.js';
+import { WsPriceClient } from '../dist/exchange/wsPriceClient.js';
+import { WsAccountClient } from '../dist/exchange/wsAccountClient.js';
 import { execSync } from 'node:child_process';
 
 function secret(k) { return execSync(`python3 /home/admin/.openclaw/secrets/secrets.py get ${k}`, {encoding:'utf8'}).trim(); }
