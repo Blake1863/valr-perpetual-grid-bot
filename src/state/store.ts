@@ -61,6 +61,22 @@ export class StateStore {
   }
   updateOrderAsCancelled(id: string): void { this._upd(id, o => { o.state = 'cancelled'; }); }
 
+  /**
+   * Per-(level, side) nonce: counts how many times a level has been used for
+   * an order that completed (filled / cancelled / rejected). Used by
+   * planDesiredOrders to generate a fresh customerOrderId that won't collide
+   * with VALR's 'customerOrderId already in use' check.
+   */
+  getLevelNonce(levelIndex: number, side: string): number {
+    return this.data.orders.filter(o =>
+      o.level_index === levelIndex &&
+      o.side === side &&
+      (o.state === 'filled' || o.state === 'cancelled' || o.state === 'rejected'),
+    ).length;
+  }
+
+  markOrderRejected(id: string): void { this._upd(id, o => { o.state = 'rejected'; }); }
+
   getActiveOrders(): { customerOrderId: string; levelIndex: number; side: string }[] {
     return this.data.orders.filter(o => o.state === 'active')
       .map(o => ({ customerOrderId: o.customer_order_id, levelIndex: o.level_index, side: o.side }));

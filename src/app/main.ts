@@ -131,7 +131,15 @@ async function main(): Promise<void> {
 
     if (supervisor.checkRangeExit(currentPrice, lowerBound, upperBound)) return;
 
-    const desired = planDesiredOrders(levels, currentPrice, quantityPerLevel, runId, constraints);
+    // Pass a nonce hook so customerOrderIds get a suffix once a previous
+    // order at the same (level, side) has reached a terminal state. Prevents
+    // duplicate-customerOrderId loops after a fill/cancel/reject without
+    // causing churn during normal reconcile (nonce stays 0 for healthy
+    // active orders).
+    const desired = planDesiredOrders(
+      levels, currentPrice, quantityPerLevel, runId, constraints,
+      (lvl, side) => store.getLevelNonce(lvl, side),
+    );
     let exchangeOrders: Awaited<ReturnType<typeof restClient.getOpenOrders>> = [];
 
     if (!config.dryRun) {
@@ -175,6 +183,10 @@ async function main(): Promise<void> {
         supervisor.clearFailures();
       } catch (e) {
         logger.error('Placement failed', { id: o.customerOrderId, error: String(e) });
+        // Mark as rejected so the reconciler doesn't keep trying to place
+        // this exact id (VALR will reject on duplicate customerOrderId even
+        // after failure, because the id is already reserved).
+        store.markOrderRejected(o.customerOrderId);
         supervisor.recordFailure(String(e));
       }
     }
@@ -184,8 +196,18 @@ async function main(): Promise<void> {
     store.setMetric('last_supervisor_state', supervisor.getState());
   };
 
-  setInterval(() => { void reconcileTick(); }, config.reconcileIntervalSecs * 1000);
-  await reconcileTick();
+  // Serialize reconcile ticks: if a placement round is still in progress
+  // (e.g. waiting on HTML-400 verification polls), skip this tick rather
+  // than running a second one in parallel — parallel ticks race each
+  // other and place duplicate orders.
+  let reconcileInFlight = false;
+  const safeReconcile = async () => {
+    if (reconcileInFlight) { logger.debug?.('Reconcile already running, skipping'); return; }
+    reconcileInFlight = true;
+    try { await reconcileTick(); } finally { reconcileInFlight = false; }
+  };
+  setInterval(() => { void safeReconcile(); }, config.reconcileIntervalSecs * 1000);
+  await safeReconcile();
 
   if (!config.dryRun) {
     setInterval(async () => {

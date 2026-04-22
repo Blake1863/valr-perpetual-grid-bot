@@ -43,12 +43,22 @@ describe('planDesiredOrders – dynamic inventory bias', () => {
     expect(desired).toHaveLength(3); // all 3 inner levels active
   });
 
-  it('customerOrderId is deterministic', () => {
+  it('customerOrderId is unique across plan() calls', () => {
+    // Every plan() call must produce FRESH customerOrderIds — VALR rejects
+    // reuse even after failure. The reconciler matches by (level, side, price)
+    // so stable ids aren't needed.
     const d1 = planDesiredOrders(levels, new Decimal('87'), new Decimal('1'), 'run1', C);
     const d2 = planDesiredOrders(levels, new Decimal('87'), new Decimal('1'), 'run1', C);
-    const ids1 = d1.map(o => o.customerOrderId).sort();
-    const ids2 = d2.map(o => o.customerOrderId).sort();
-    expect(ids1).toEqual(ids2);
+    const ids1 = new Set(d1.map(o => o.customerOrderId));
+    const ids2 = new Set(d2.map(o => o.customerOrderId));
+    const overlap = [...ids1].filter(id => ids2.has(id));
+    expect(overlap).toEqual([]);
+  });
+
+  it('customerOrderId is unique within a single plan() call', () => {
+    const desired = planDesiredOrders(levels, new Decimal('87'), new Decimal('1'), 'run1', C);
+    const ids = desired.map(o => o.customerOrderId);
+    expect(new Set(ids).size).toBe(ids.length);
   });
 
   it('customerOrderId changes with different runId', () => {

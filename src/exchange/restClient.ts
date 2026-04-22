@@ -188,11 +188,82 @@ export class ValrRestClient {
       reduceOnly,
       timeInForce,
     };
-    return request(
-      'POST', '/v2/orders/limit',
-      this.apiKey, this.apiSecret, this.subaccountId,
-      body,
-    ) as Promise<{ orderId: string }>;
+    try {
+      return await (request(
+        'POST', '/v2/orders/limit',
+        this.apiKey, this.apiSecret, this.subaccountId,
+        body,
+      ) as Promise<{ orderId: string }>);
+    } catch (e) {
+      // VALR's REST layer intermittently returns an HTML 400 page ("Your
+      // client has issued a malformed or illegal request") even after
+      // successfully accepting the order. Before treating the placement as
+      // failed, look the order up by customerOrderId. If it's on the
+      // exchange, trust the exchange — the HTML 400 was spurious.
+      const errStr = String(e);
+      const isHtml400 =
+        errStr.includes('<html') ||
+        (errStr.toLowerCase().includes('bad request') && errStr.includes('Your client'));
+      if (!isHtml400) throw e;
+
+      // Poll the history endpoint briefly. Keep this tight so initial
+      // grid setup doesn't stretch into minutes. If this short window
+      // doesn't confirm, we throw and the reconciler self-heals via
+      // (level, side, price) matching on the next tick.
+      const delays = [400, 700];
+      for (const d of delays) {
+        await new Promise((r) => setTimeout(r, d));
+        try {
+          const lookup = await this.lookupOrderByCustomerId(customerOrderId);
+          if (lookup && lookup.orderId) {
+            const st = (lookup.status || '').toLowerCase();
+            // 'Placed' / 'partially filled' / 'filled' — all mean VALR
+            // accepted the order. Only treat as genuine failure if the
+            // only record is "Failed" or the lookup returns nothing.
+            if (st !== 'failed' && st !== 'rejected') {
+              return { orderId: lookup.orderId };
+            }
+          }
+        } catch { /* retry */ }
+      }
+      throw e;
+    }
+  }
+
+  /**
+   * Look up an order by its customerOrderId across ALL statuses (open,
+   * placed, filled, etc.). Returns null if the order was never received
+   * by the exchange. Used to recover from spurious HTML 400 responses.
+   *
+   * https://api-docs.rooibos.dev/api-docs/getV1OrdersHistoryDetailCustomerorderidCustomerOrderId.md
+   */
+  async lookupOrderByCustomerId(
+    customerOrderId: string,
+  ): Promise<{ orderId: string; status: string; currencyPair: string } | null> {
+    try {
+      const data = await request(
+        'GET', `/v1/orders/history/detail/customerorderid/${encodeURIComponent(customerOrderId)}`,
+        this.apiKey, this.apiSecret, this.subaccountId,
+      ) as any;
+      // Endpoint returns either a single object or an array of history events.
+      // Prefer the *earliest* event that looks like a placement (orderStatusType
+      // 'Placed' / 'Open' / 'Partially Filled'). If no placement events exist,
+      // fall back to the first row. Returns null if the order is unknown.
+      const rows: any[] = Array.isArray(data) ? data : (data ? [data] : []);
+      if (rows.length === 0) return null;
+      const placement = rows.find(r => {
+        const st = String(r.orderStatusType || r.status || '').toLowerCase();
+        return st === 'placed' || st === 'open' || st.includes('partially');
+      }) ?? rows[0];
+      if (!placement || !placement.orderId) return null;
+      return {
+        orderId: placement.orderId as string,
+        status: (placement.orderStatusType || placement.status || '') as string,
+        currencyPair: (placement.currencyPair || '') as string,
+      };
+    } catch {
+      return null;
+    }
   }
 
   async cancelOrder(orderId: string, pair: string): Promise<void> {

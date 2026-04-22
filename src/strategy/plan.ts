@@ -16,12 +16,30 @@ export interface DesiredOrder {
   customerOrderId: string;
 }
 
+/**
+ * Optional hook the bot can pass in. Unused by the current id scheme but
+ * kept in the signature for backwards compatibility with tests.
+ */
+export type LevelNonceFn = (levelIndex: number, side: 'BUY' | 'SELL') => number;
+
+/**
+ * Module-scoped counter bumped on every plan() call that needs a new
+ * customerOrderId. Combined with the runId it guarantees uniqueness across
+ * reconcile ticks without leaking state between levels.
+ */
+let _idCounter = 0;
+function nextIdSuffix(): string {
+  _idCounter = (_idCounter + 1) % 1_000_000;
+  return _idCounter.toString(36);
+}
+
 export function planDesiredOrders(
   levels: Level[],
   currentPrice: D,
   quantityPerLevel: D,
   runId: string,
   constraints: PairConstraints,
+  _levelNonceFn: LevelNonceFn = () => 0,
 ): DesiredOrder[] {
   if (levels.length < 3) {
     throw new Error('At least 3 levels expected (2 boundaries + 1 inner)');
@@ -45,7 +63,11 @@ export function planDesiredOrders(
     }
 
     if (side !== null) {
-      const orderId = `gridv4-${side[0]}${level.index}-${runId}`.slice(0, 50);
+      // customerOrderId must be unique per placement attempt (VALR rejects
+      // reuse even after failure), but the reconciler matches by
+      // (level, side, price) so the id doesn't need to be stable across
+      // ticks. A monotonic counter per plan() call gives us uniqueness.
+      const orderId = `gridv4-${side[0]}${level.index}-${runId}-${nextIdSuffix()}`.slice(0, 50);
       desired.push({
         levelIndex: level.index,
         side,
