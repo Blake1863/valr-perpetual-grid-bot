@@ -1,0 +1,12 @@
+{
+  "pair": "ETHUSDTPERP",
+  "subaccountId": "1491067064373735424",
+  "gridCount": 30,
+  "lowerBound": "2228.00",
+  "upperBound": "2463.00",
+  "stopLossPercent": 3.0,
+  "gridMode": "geometric",
+  "leverage": 10,
+  "reservePercent": 10,
+  "dryRun": false
+}

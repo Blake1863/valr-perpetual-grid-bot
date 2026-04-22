@@ -1,0 +1,12 @@
+{
+  "pair": "SOLUSDTPERP",
+  "subaccountId": "1432690254033137664",
+  "gridCount": 30,
+  "lowerBound": "82.00",
+  "upperBound": "92.00",
+  "stopLossPercent": 3.0,
+  "gridMode": "geometric",
+  "leverage": 10,
+  "reservePercent": 10,
+  "dryRun": false
+}

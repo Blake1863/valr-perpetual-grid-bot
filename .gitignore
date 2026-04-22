@@ -1,0 +1,7 @@
+node_modules/
+dist/
+logs/
+*.db
+.env
+configs/*.json
+!configs/*.example.json

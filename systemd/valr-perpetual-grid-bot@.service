@@ -1,0 +1,17 @@
+[Unit]
+Description=VALR Perpetual Grid Bot (%i)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/admin/.openclaw/workspace/bots/valr-perpetual-grid-bot
+EnvironmentFile=/home/admin/.openclaw/workspace/bots/valr-perpetual-grid-bot/.env
+ExecStart=/usr/bin/node dist/app/main.js configs/%i.json
+Restart=always
+RestartSec=10
+StandardOutput=append:%h/.openclaw/workspace/bots/valr-perpetual-grid-bot/logs/%i.log
+StandardError=append:%h/.openclaw/workspace/bots/valr-perpetual-grid-bot/logs/%i.log
+
+[Install]
+WantedBy=default.target
