@@ -42,7 +42,7 @@ async function main(): Promise<void> {
 
   const restClient = new ValrRestClient(key, secret, config.subaccountId);
   const priceClient = new WsPriceClient(config.pair, config.staleDataTimeoutMs);
-  const accountClient = new WsAccountClient(key, secret, config.subaccountId);
+  const accountClient = new WsAccountClient(key, secret, config.subaccountId, config.pair);
   const alertSender = new TelegramAlertSender(config.telegramGatewayUrl, config.telegramChatId);
   const store = new StateStore(config.pair);
   const supervisor = new Supervisor(config, alertSender);
