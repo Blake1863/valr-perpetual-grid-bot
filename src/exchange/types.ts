@@ -47,11 +47,24 @@ export interface Position {
   marginUsed: string;
 }
 
+/**
+ * Account margining info as returned by GET /v1/margin/status.
+ * https://api-docs.rooibos.dev/api-docs/getV1MarginStatus.md
+ *
+ * All *Fraction fields are 0..1 (e.g. "0.107" means 10.7%).
+ * All *InReference fields are denominated in `referenceCurrency` (USDC).
+ */
 export interface MarginInfo {
-  totalMargin: string;
-  usedMargin: string;
-  freeMargin: string;
-  marginRatio: string;  // percentage, e.g. "25.5"
+  marginFraction: string;
+  initialMarginFraction: string;
+  maintenanceMarginFraction: string;
+  autoCloseMarginFraction: string;
+  collateralisedBalancesInReference: string;
+  availableInReference: string;
+  initialRequiredInReference: string;
+  totalUnrealisedFuturesPnlInReference: string;
+  leverageMultiple: number;
+  referenceCurrency: string;
 }
 
 export interface ValrApiError extends Error {

@@ -63,15 +63,16 @@ export class Supervisor {
   }
 
   checkMarginRatio(marginInfo: MarginInfo): void {
-    const used = new Decimal(marginInfo.usedMargin);
-    const total = new Decimal(marginInfo.totalMargin);
-    if (total.isZero()) return;
-    const ratio = used.div(total).mul(100);
-    if (ratio.gte(this.config.marginRatioAlertPercent)) {
+    // VALR reports the ratio directly as `initialMarginFraction` (0..1 scale).
+    // Docs: /v1/margin/status returns initialMarginFraction, maintenanceMarginFraction, etc.
+    const imf = new Decimal(marginInfo.initialMarginFraction || '0');
+    if (imf.isZero()) return;
+    const ratioPct = imf.mul(100);
+    if (ratioPct.gte(this.config.marginRatioAlertPercent)) {
       const now = Date.now();
       if (now - this.lastMarginAlert > 600_000) {
-        logger.warn('High margin ratio', { ratio: ratio.toFixed(2) });
-        this.alertSender.send(`⚠️ High margin: ${ratio.toFixed(2)}%`).catch(() => { /* ignore */ });
+        logger.warn('High margin ratio', { imf: imf.toFixed(4), ratioPct: ratioPct.toFixed(2) });
+        this.alertSender.send(`⚠️ High initial margin: ${ratioPct.toFixed(2)}%`).catch(() => { /* ignore */ });
         this.lastMarginAlert = now;
       }
     }

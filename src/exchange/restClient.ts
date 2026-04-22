@@ -1,14 +1,27 @@
 /**
  * VALR REST API client with HMAC-SHA512 authentication.
  *
- * Critical implementation notes (learned from v3 bugs):
- * - Subaccount ID goes in header X-VALR-SUB-ACCOUNT-ID AND in signature message
+ * ALL endpoints here are verified against the official VALR docs:
+ *   https://api-docs.rooibos.dev/llms-full.txt
+ *   (local mirror: skills/valr-exchange/references/valr-llms-full.txt)
+ *
+ * RULE: Never guess endpoints. If a call is needed, grep the docs first.
+ *
+ * Critical implementation notes:
+ * - Signature message: timestamp + VERB + path + body + subaccountId (HMAC-SHA512 hex)
+ * - Request headers: X-VALR-API-KEY, X-VALR-SIGNATURE, X-VALR-TIMESTAMP, X-VALR-SUB-ACCOUNT-ID
+ * - When subaccount header present, subaccountId MUST be in signature too (or -11252)
  * - placeLimitOrder passes through postOnly, reduceOnly, timeInForce — do NOT drop them
- * - Market close uses `baseAmount` field, not `quantity`
- * - Cancel needs body `{ "pair": "..." }`, not `{ "currencyPair": "..." }`
- * - Leverage PUT body must be string: `{ "leverageMultiple": "10" }`
+ * - Market orders use `baseAmount` or `quoteAmount`, plus explicit `side` (BUY/SELL)
+ * - Cancel-single: DELETE /v2/orders/order  body { orderId|customerOrderId, pair }
+ * - Cancel-all:    DELETE /v1/orders        (no body, returns array of cancelled ids)
+ * - Cancel-by-pair: DELETE /v1/orders/{currencyPair}
+ * - Leverage PUT body must be string: { leverageMultiple: "10" }
+ * - Margin info:   GET /v1/margin/status  (NOT /v1/account/margin/futures — that's 404)
+ * - Open orders:   GET /v1/orders/open    (no query; returns all pairs — filter client-side)
+ *                  Response uses `currencyPair` + `remainingQuantity` (not pair + quantity)
  */
-import { createHmac, timingSafeEqual } from 'node:crypto';
+import { createHmac } from 'node:crypto';
 import https from 'node:https';
 import {
   ExchangeOrder,
@@ -38,25 +51,26 @@ async function request(
   const timestamp = Date.now().toString();
   const bodyStr = body ? JSON.stringify(body) : '';
 
-  // Signature message: method + path + body + subaccountId
-  // Note: subaccountId is appended to the message for signing
-  const messageToSign = `${method}${path}${bodyStr}${subaccountId}`;
+  // VALR signature: HMAC-SHA512(secret, timestamp + VERB + path + body + subaccountId)
+  // https://api-docs.rooibos.dev/guides/authentication
+  const messageToSign = `${timestamp}${method.toUpperCase()}${path}${bodyStr}${subaccountId}`;
   const signature = hmacSign(apiSecret, messageToSign);
+
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    'X-VALR-API-KEY': apiKey,
+    'X-VALR-SIGNATURE': signature,
+    'X-VALR-TIMESTAMP': timestamp,
+  };
+  // Only send the subaccount header when actually impersonating a subaccount.
+  // Empty string still gets signed in (matches docs), but sending an empty header
+  // is safer to omit to avoid any server-side strictness.
+  if (subaccountId) headers['X-VALR-SUB-ACCOUNT-ID'] = subaccountId;
 
   return new Promise((resolve, reject) => {
     const req = https.request(
       url.toString(),
-      {
-        method,
-        headers: {
-          'Content-Type': 'application/json',
-          'X-VALR-API-KEY': apiKey,
-          'X-VALR-REQUEST-SIGNATURE': signature,
-          'X-VALR-REQUEST-TIMESTAMP': timestamp,
-          'X-VALR-SUB-ACCOUNT-ID': subaccountId,
-        },
-        timeout: 15_000,
-      },
+      { method, headers, timeout: 15_000 },
       (res) => {
         const chunks: Buffer[] = [];
         res.on('data', (chunk) => chunks.push(Buffer.from(chunk)));
@@ -122,23 +136,33 @@ export class ValrRestClient {
   }
 
   async getOpenOrders(pair: string): Promise<ExchangeOrder[]> {
+    // GET /v1/orders/open takes NO query parameters — returns ALL open orders
+    // across every pair. Filter client-side by currencyPair.
+    // Response fields: currencyPair, remainingQuantity, originalQuantity (not pair/quantity)
     const data = await request(
-      'GET', `/v1/orders/open?pair=${encodeURIComponent(pair)}`,
+      'GET', '/v1/orders/open',
       this.apiKey, this.apiSecret, this.subaccountId,
     ) as any[];
-    return data
-      .filter((o) => o.pair === pair)
+    return (data || [])
+      .filter((o) => o.currencyPair === pair)
       .map((o) => ({
         exchangeOrderId: o.orderId as string,
         customerOrderId: (o.customerOrderId as string) || '',
-        pair: o.pair as string,
-        side: (o.side as 'BUY' | 'SELL'),
+        pair: o.currencyPair as string,
+        // Side in the response is lowercase ("buy"/"sell") — normalise.
+        side: (String(o.side).toUpperCase() as 'BUY' | 'SELL'),
         price: o.price as string,
-        quantity: o.quantity as string,
-        filledQuantity: (o.filledQuantity as string) || '0',
+        quantity: (o.originalQuantity as string) || '0',
+        // filledQuantity = originalQuantity - remainingQuantity (server returns filledPercentage too).
+        filledQuantity: (() => {
+          const orig = Number(o.originalQuantity || 0);
+          const rem = Number(o.remainingQuantity || 0);
+          const filled = orig - rem;
+          return filled >= 0 ? filled.toString() : '0';
+        })(),
         status: o.status as string,
         type: o.type as string,
-        postOnly: (o.postOnly as boolean) ?? false,
+        postOnly: (o.type as string || '').toLowerCase().includes('post'),
         reduceOnly: (o.reduceOnly as boolean) ?? false,
         createdAt: o.createdAt as string,
       }));
@@ -172,28 +196,35 @@ export class ValrRestClient {
   }
 
   async cancelOrder(orderId: string, pair: string): Promise<void> {
+    // Preferred single-cancel: DELETE /v2/orders/order with JSON body.
+    // Body: { orderId | customerOrderId, pair } (not both ids).
+    // https://api-docs.rooibos.dev/api-docs/deleteV2OrdersOrder.md
     await request(
-      'DELETE', `/v1/orders/${orderId}`,
+      'DELETE', '/v2/orders/order',
       this.apiKey, this.apiSecret, this.subaccountId,
-      { pair },
+      { orderId, pair },
     );
   }
 
-  async cancelAllOrders(pair: string): Promise<void> {
-    await request(
-      'POST', '/v1/orders/batch-cancel',
-      this.apiKey, this.apiSecret, this.subaccountId,
-      { pair },
-    );
+  async cancelAllOrders(pair?: string): Promise<void> {
+    // If pair given, cancel for that pair only (DELETE /v1/orders/{currencyPair}).
+    // Otherwise batch cancel everything (DELETE /v1/orders).
+    // https://api-docs.rooibos.dev/api-docs/deleteV1OrdersCurrencyPair.md
+    // https://api-docs.rooibos.dev/api-docs/deleteV1Orders.md
+    const path = pair ? `/v1/orders/${encodeURIComponent(pair)}` : '/v1/orders';
+    await request('DELETE', path, this.apiKey, this.apiSecret, this.subaccountId);
   }
 
-  async marketClose(pair: string, baseAmount: string): Promise<void> {
-    // Market-close position with reduceOnly
+  async marketClose(pair: string, side: 'BUY' | 'SELL', baseAmount: string): Promise<void> {
+    // To close a position, send a market order on the OPPOSITE side with reduceOnly=true.
+    // Caller must pass the closing side (not the position side).
+    // https://api-docs.rooibos.dev/api-docs/postV1OrdersMarket.md
     const body = {
       pair,
-      side: 'SELL', // will be adjusted by exchange for reduceOnly
+      side,
       baseAmount,
       reduceOnly: true,
+      timeInForce: 'IOC',
     };
     await request(
       'POST', '/v1/orders/market',
@@ -255,20 +286,34 @@ export class ValrRestClient {
   }
 
   async getMarginInfo(): Promise<{
-    totalMargin: string;
-    usedMargin: string;
-    freeMargin: string;
-    marginRatio: string;
+    marginFraction: string;
+    initialMarginFraction: string;
+    maintenanceMarginFraction: string;
+    autoCloseMarginFraction: string;
+    collateralisedBalancesInReference: string;
+    availableInReference: string;
+    initialRequiredInReference: string;
+    totalUnrealisedFuturesPnlInReference: string;
+    leverageMultiple: number;
+    referenceCurrency: string;
   }> {
+    // Correct endpoint per VALR docs is /v1/margin/status (or /v2/margin/status).
+    // https://api-docs.rooibos.dev/api-docs/getV1MarginStatus.md
     const data = await request(
-      'GET', '/v1/account/margin/futures',
+      'GET', '/v1/margin/status',
       this.apiKey, this.apiSecret, this.subaccountId,
     ) as any;
     return {
-      totalMargin: (data.totalMargin as string) || (data.total as string) || '0',
-      usedMargin: (data.usedMargin as string) || (data.used as string) || '0',
-      freeMargin: (data.freeMargin as string) || (data.available as string) || '0',
-      marginRatio: (data.marginRatio as string) || '0',
+      marginFraction: (data.marginFraction as string) || '0',
+      initialMarginFraction: (data.initialMarginFraction as string) || '0',
+      maintenanceMarginFraction: (data.maintenanceMarginFraction as string) || '0',
+      autoCloseMarginFraction: (data.autoCloseMarginFraction as string) || '0',
+      collateralisedBalancesInReference: (data.collateralisedBalancesInReference as string) || '0',
+      availableInReference: (data.availableInReference as string) || '0',
+      initialRequiredInReference: (data.initialRequiredInReference as string) || '0',
+      totalUnrealisedFuturesPnlInReference: (data.totalUnrealisedFuturesPnlInReference as string) || '0',
+      leverageMultiple: Number(data.leverageMultiple || 0),
+      referenceCurrency: (data.referenceCurrency as string) || 'USDC',
     };
   }
 }
